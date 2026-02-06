@@ -1,0 +1,59 @@
+# Python
+
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual Environments
+
+.venv/
+venv/
+env/
+ENV/
+
+# PyTorch / ML Artifacts
+
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Jupyter
+
+.ipynb_checkpoints/
+
+# VS Code
+
+.vscode/
+
+
+# PyCharm
+
+.idea/
+
+
+# Logs and Outputs
+
+logs/
+*.log
+experiments/logs/
+experiments/results/
+
+
+# Data (do not commit datasets)
+
+data/raw/
+data/processed/
+
+
+# OS Files
+
+.DS_Store
+Thumbs.db
+
+# Temporary / Backup
+
+*.tmp
+*.bak
+*.swp
