@@ -1,0 +1,27 @@
+# Core ML
+torch>=2.0.0
+torchvision>=0.15.0
+timm>=0.9.0
+
+# Vision / Video
+opencv-python
+Pillow
+
+# Scientific computing
+numpy
+scipy
+
+# Visualization
+matplotlib
+seaborn
+
+# Experiment utilities
+tqdm
+pyyaml
+
+# Jupyter (for notebooks/)
+jupyter
+ipykernel
+
+# Optional (used for profiling / benchmarking)
+psutil
