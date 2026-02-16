@@ -9,6 +9,8 @@ from src.utils.timer import Timer
 from src.evaluation.predictions import topk_from_logits
 from src.utils.io import save_rows_to_csv
 from src.evaluation.report import summarize_run
+from src.utils.hooks import register_vit_block_hooks
+
 
 
 def main():
@@ -18,12 +20,19 @@ def main():
     parser.add_argument("--max-frames", type=int, default=30, help="Limit number of frames")
     parser.add_argument("--topk", type=int, default=5, help="Top-k predictions to compute")
     parser.add_argument("--out", type=str, default="results/baseline_run.csv", help="CSV output path")
+    parser.add_argument("--use-hooks", type=int, default=1, help="1=log token shapes per block, 0=off")
+
     args = parser.parse_args()
 
     device = torch.device("cpu")
 
     # Loading model and preprocessing
     model, transform, class_names = load_timm_vit(model_name=args.model, pretrained=True)
+    
+    hook_state = None
+    if args.use_hooks:
+        hook_state = register_vit_block_hooks(model)
+
 
     # Loading frames
     frames = load_frames_from_folder(Path(args.frames), max_frames=args.max_frames)
@@ -61,6 +70,11 @@ def main():
     print(f"avg_latency_ms: {summary['avg_latency_ms']:.2f}")
     print(f"fps: {summary['fps']:.2f}")
     print(f"saved_csv: {args.out}")
+    
+    if hook_state is not None:
+        print("\n    TOKEN SHAPES (per block)    ")
+        hook_state.pretty_print()
+
 
 
 if __name__ == "__main__":
