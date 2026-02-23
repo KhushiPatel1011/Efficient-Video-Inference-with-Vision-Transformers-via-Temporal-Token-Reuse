@@ -39,7 +39,7 @@ def main():
 
     device = torch.device("cpu")
 
-    # Load model + preprocess (we use preprocess for both inference + patch scoring)
+    # Load model + preprocess (we are using preprocess for both inference + patch scoring)
     model, transform, _ = load_timm_vit(model_name=args.model, pretrained=True)
     model.to(device)
     model.eval()
@@ -54,7 +54,7 @@ def main():
     print("t, changed_patches, total_patches, stable_ratio, baseline_ms, simulated_ms, threshold")
 
     # Warmup: run a few forward passes to reduce one-time overhead noise
-    # (Still CPU, still honest — just avoids first-run spikes.)
+    # Still CPU, still honest — just avoids first-run spikes
     if args.warmup > 0:
         it = iter_frame_pairs(frames_dir, max_frames=min(args.max_frames, args.warmup + 1))
         for _, _, curr_img in it:
@@ -76,14 +76,14 @@ def main():
         curr = transform(curr_img).to(device)      # [3,H,W]
         x = curr.unsqueeze(0)                      # [1,3,H,W]
 
-        # 1) Baseline inference timing (real)
+        # Baseline inference timing (real)
         t0 = time.perf_counter()
         with torch.no_grad():
             _ = model(x)
         t1 = time.perf_counter()
         baseline_ms = _ms(t0, t1)
 
-        # 2) Patch-level temporal change scoring (ViT-consistent)
+        # Patch-level temporal change scoring (ViT-consistent)
         scores = patch_change_scores(prev, curr, patch_size=args.patch_size)
         changed_mask, thresh = change_mask_from_scores(scores, keep_ratio=args.keep_ratio)
         total_patches = int(scores.numel())
@@ -94,7 +94,7 @@ def main():
         if total_patches_known is None:
             total_patches_known = total_patches
 
-        # 3) Simulation: estimate time if we only recompute changed patches
+        # Simulation: estimate time if we only recompute changed patches
         # Assumption: ViT compute roughly scales with number of spatial tokens processed.
         # Simulated ratio uses changed/total (CLS excluded since constant).
         compute_ratio = changed / float(total_patches)
@@ -128,14 +128,14 @@ def main():
         avg_sim = sum(simulated_times) / len(simulated_times)
         avg_stable = sum(stable_ratios) / len(stable_ratios)
 
-        # Convert ms -> fps
+        # ms -> fps
         base_fps = 1000.0 / avg_base if avg_base > 0 else 0.0
         sim_fps = 1000.0 / avg_sim if avg_sim > 0 else 0.0
 
-        # "Estimated speedup" is simulated_fps / baseline_fps (or baseline_ms / simulated_ms)
+        # "Estimated speedup" is simulated_fps / baseline_fps 
         est_speedup = (avg_base / avg_sim) if avg_sim > 0 else 0.0
 
-        print("\n=== SUMMARY (Simulation) ===")
+        print("\n    SUMMARY   ")
         print(f"frames_used (pairs): {len(rows)}")
         print(f"avg_baseline_ms: {avg_base:.2f}")
         print(f"avg_baseline_fps: {base_fps:.2f}")
