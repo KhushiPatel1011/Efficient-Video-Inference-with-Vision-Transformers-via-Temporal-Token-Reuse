@@ -47,8 +47,8 @@ def main():
     frames_dir = Path(args.frames)
     rows: List[Dict] = []
 
-    print("\n=== TEMPORAL TOKEN REUSE (SIMULATION MODE) ===")
-    print("Mode: Option A (no model internals modified).")
+    print("\nTEMPORAL TOKEN REUSE")
+    print("Note: no model internals modified yet")
     print("We estimate compute savings using temporal patch stability.\n")
 
     print("t, changed_patches, total_patches, stable_ratio, baseline_ms, simulated_ms, threshold")
