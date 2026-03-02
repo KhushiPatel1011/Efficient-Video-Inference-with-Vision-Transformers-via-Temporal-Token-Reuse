@@ -86,7 +86,7 @@ def build_tokens_pre_blocks(
         x_tokens = torch.cat((cls_tok, x_tokens), dim=1)
         start_idx = 1
 
-    # Dist token (if any)
+    # Dist token 
     if hasattr(model, "dist_token") and model.dist_token is not None:
         dist_tok = model.dist_token.expand(B, -1, -1)
         x_tokens = torch.cat((x_tokens[:, :start_idx], dist_tok, x_tokens[:, start_idx:]), dim=1)
