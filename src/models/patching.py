@@ -80,7 +80,7 @@ def _extract_bg_fg(
     attn: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Spliting tokens into background (low saliency) and foreground (high saliency).
+    Split tokens into background (low saliency) and foreground (high saliency).
 
     x:    [B, N, C]
     attn: [B, num_heads, N, N]
@@ -94,12 +94,12 @@ def _extract_bg_fg(
     B, N, C = x.shape
     scores = _get_saliency_scores(attn).squeeze(-1)  # [B, N]
 
+    # Count bg tokens (score == 0) per sample, take the max across batch
     n_bg = int((scores == 0).float().sum(dim=-1).max().item())
-    n_fg = int((scores != 0).float().sum(dim=-1).max().item())
 
-    # Ensuring at least 1 token in each group
+    # Strictly enforce n_bg + n_fg == N
     n_bg = max(1, min(n_bg, N - 1))
-    n_fg = max(1, N - n_bg)
+    n_fg = N - n_bg  # guaranteed: n_bg + n_fg == N, both >= 1
 
     idx_bg = torch.topk(scores, k=n_bg, dim=-1, largest=False).indices  # [B, N_bg]
     idx_fg = torch.topk(scores, k=n_fg, dim=-1, largest=True).indices   # [B, N_fg]
