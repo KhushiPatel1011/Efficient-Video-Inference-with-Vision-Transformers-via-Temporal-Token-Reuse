@@ -152,11 +152,19 @@ class TBKVAttention(Attention):
             # Getting indices of changed tokens
             # changed_mask: [B, N]
             # For simplicity with B=1, using batch dim 0
-            K_fresh = self.k(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
-            V_fresh = self.v(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
-            changed_expanded = changed_mask.unsqueeze(1).unsqueeze(-1).expand_as(K)
-            K = torch.where(changed_expanded, K_fresh, K)
-            V = torch.where(changed_expanded, V_fresh, V)
+            changed_idx = changed_mask[0].nonzero(as_tuple=False).squeeze(-1)  # [n_changed]
+
+            if changed_idx.numel() > 0:
+                # Extracting ONLY changed tokens from x: [B, n_changed, C]
+                x_changed = x[:, changed_idx, :]
+
+                # Computing K, V only for changed tokens: [B, n_changed, heads, head_dim]
+                K_changed = self.k(x_changed).reshape(B, -1, self.num_heads, head_dim).permute(0, 2, 1, 3)
+                V_changed = self.v(x_changed).reshape(B, -1, self.num_heads, head_dim).permute(0, 2, 1, 3)
+
+                # Scattering back into full K, V tensors at changed positions
+                K[:, :, changed_idx, :] = K_changed
+                V[:, :, changed_idx, :] = V_changed
         else:
             # Caching mode or first frame: compute everything fresh
             K = self.k(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
