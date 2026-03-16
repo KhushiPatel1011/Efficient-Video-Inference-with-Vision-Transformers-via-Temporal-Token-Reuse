@@ -57,10 +57,12 @@ def _get_saliency_scores(attn: torch.Tensor) -> torch.Tensor:
     returns: scores [B, N, 1]  (0 = background, >0 = foreground)
     """
     if attn.dim() == 4:
-        attn = attn.mean(dim=1)  # [B, N, N]
+        attn_avg = attn.mean(dim=1)  # [B, N, N]
+    else:
+        attn_avg = attn
 
     # Entropy-based saliency
-    scores = (attn * torch.log(attn + 1e-6)).sum(dim=-1, keepdim=True)  # [B, N, 1]
+    scores = (attn_avg * torch.log(attn_avg + 1e-6)).sum(dim=-1, keepdim=True)  # [B, N, 1]
 
     # Normalizing per sample
     scores = scores - scores.amin(dim=1, keepdim=True)
@@ -99,10 +101,10 @@ def _extract_bg_fg(
 
     # Strictly enforce n_bg + n_fg == N
     n_bg = max(1, min(n_bg, N - 1))
-    n_fg = N - n_bg  # guaranteed: n_bg + n_fg == N, both >= 1
+    n_fg = N - n_bg  # always >= 1, always sums to N
 
-    idx_bg = torch.topk(scores, k=n_bg, dim=-1, largest=False).indices  # [B, N_bg]
-    idx_fg = torch.topk(scores, k=n_fg, dim=-1, largest=True).indices   # [B, N_fg]
+    idx_bg = torch.topk(scores, k=n_bg, dim=-1, largest=False).indices  # [B, n_bg]
+    idx_fg = torch.topk(scores, k=n_fg, dim=-1, largest=True).indices   # [B, n_fg]
 
     x_bg = torch.gather(x, dim=1, index=idx_bg.unsqueeze(-1).expand(-1, -1, C))
     x_fg = torch.gather(x, dim=1, index=idx_fg.unsqueeze(-1).expand(-1, -1, C))
@@ -125,7 +127,7 @@ class TBKVAttention(Attention):
         x: torch.Tensor,
         cache: Optional[KVCache] = None,
         x_unnorm: Optional[torch.Tensor] = None,
-        mode: str = "cache",          # "cache" | "match"
+        mode: str = "cache",
         prev_attn: Optional[torch.Tensor] = None,
         r_match: float = 0.75,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
@@ -147,7 +149,9 @@ class TBKVAttention(Attention):
             x_bg, x_fg, idx_bg, idx_fg = _extract_bg_fg(x, prev_attn)
 
             # Match background tokens against cache
-            k_matched, v_matched, mc, mt_idx, unm_idx = cache.match_tokens(x_bg, r_match=r_match)
+            k_matched, v_matched, mc, mt_idx, unm_idx = cache.match_tokens(
+                x_bg, r_match=r_match
+            )
 
             # Unmatched background tokens that needs fresh KV
             unm_bg = torch.gather(
@@ -221,14 +225,13 @@ class TBKVBlock(Block):
         return self.drop_path2(x) if hasattr(self, "drop_path2") else self.drop_path(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B = x.shape[0]
         norm_x = self.norm1(x)
 
-        mode = getattr(self, "_tbkv_mode", "cache")
-        prev_attn = getattr(self, "_prev_attn", None)
-        r_match = getattr(self, "_tbkv_r_match", 0.75)
+        mode      = getattr(self, "_tbkv_mode",    "cache")
+        prev_attn = getattr(self, "_prev_attn",    None)
+        r_match   = getattr(self, "_tbkv_r_match", 0.75)
 
-        # Patched Attention 
+        # Patched Attention
         attn_out, K, V, new_tokens, attn_map = self.attn(
             norm_x,
             cache=self.cache,
@@ -238,17 +241,15 @@ class TBKVBlock(Block):
             r_match=r_match,
         )
 
-        # Residual connection
+        # Residual Connection
         if new_tokens is not None and new_tokens.shape[1] != x.shape[1]:
             x = new_tokens + self._drop_path1(attn_out)
         else:
             x = x + self._drop_path1(attn_out)
 
-        # Store K/V/tokens in cache or pass through (matching mode)
+        # Update cache in caching mode
         if mode == "cache":
-            # Store background tokens (merged) + full K/V for next frame
-            tokens_to_cache = x  # store all tokens; matching will select bg subset
-            self.cache.store(K, V, tokens_to_cache, attn=attn_map)
+            self.cache.store(K, V, x, attn=attn_map)
 
         # Store attention map for next layer's bg/fg split
         self._prev_attn = attn_map.detach() if attn_map is not None else None
@@ -258,10 +259,7 @@ class TBKVBlock(Block):
 
 # apply_patch: entry point to patch a timm ViT
 
-def apply_patch(
-    model: VisionTransformer,
-    r_match: float = 0.75,
-) -> VisionTransformer:
+def apply_patch(model: VisionTransformer, r_match: float = 0.75) -> VisionTransformer:
     """
     Patching a timm ViT in-place for KV temporal token reuse.
 
@@ -276,7 +274,6 @@ def apply_patch(
     Returns:
         model (patched in-place)
     """
-    
     for module in model.modules():
         if isinstance(module, Block) and not isinstance(module, TBKVBlock):
             module.__class__ = TBKVBlock
