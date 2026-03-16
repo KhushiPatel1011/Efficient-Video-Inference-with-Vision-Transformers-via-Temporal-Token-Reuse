@@ -85,7 +85,7 @@ def main():
     model.eval()
 
     print(f"Applying TBKV patch (r_match={args.r_match})...")
-    apply_patch(model, r_match=args.r_match)
+    apply_patch(model, stable_ratio=args.r_match)
     reset_cache(model)
 
     print("\n    KV-CACHE TEMPORAL TOKEN REUSE")
