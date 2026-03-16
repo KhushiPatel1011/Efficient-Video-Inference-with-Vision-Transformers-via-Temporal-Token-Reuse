@@ -144,25 +144,27 @@ class TBKVAttention(Attention):
 
             changed_mask = ~stable_mask  # [B, N] — True = changed
 
-            # Recomputing K, V only for changed tokens
-            # Start with full cached K, V
+            # Recomputing K, V ONLY for changed tokens 
+            # Starting from cached K, V
             K = cache.K.clone()  # [B, heads, N, head_dim]
             V = cache.V.clone()
 
-            # For each changed token, recompute its K and V
-            # We do this efficiently by computing K/V for all then selecting
-            K_fresh = self.k(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
-            V_fresh = self.v(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
+            # Getting indices of changed tokens
+            # changed_mask: [B, N]
+            # For simplicity with B=1, using batch dim 0
+            changed_idx = changed_mask[0].nonzero(as_tuple=False).squeeze(-1)  # [n_changed]
 
-            # Replacing changed positions with fresh K, V
-            # changed_mask: [B, N] -> expand to [B, heads, N, head_dim]
-            changed_expanded = changed_mask.unsqueeze(1).unsqueeze(-1).expand_as(K)
-            K = torch.where(changed_expanded, K_fresh, K)
-            V = torch.where(changed_expanded, V_fresh, V)
+            if changed_idx.numel() > 0:
+                # Extracting ONLY changed tokens from x: [B, n_changed, C]
+                x_changed = x[:, changed_idx, :]
 
-            n_changed = int(changed_mask.float().sum(dim=-1).mean().item())
-            n_stable = N - n_changed
+                # Computing K, V only for changed tokens: [B, n_changed, heads, head_dim]
+                K_changed = self.k(x_changed).reshape(B, -1, self.num_heads, head_dim).permute(0, 2, 1, 3)
+                V_changed = self.v(x_changed).reshape(B, -1, self.num_heads, head_dim).permute(0, 2, 1, 3)
 
+                # Scattering back into full K, V tensors at changed positions
+                K[:, :, changed_idx, :] = K_changed
+                V[:, :, changed_idx, :] = V_changed
         else:
             # Caching mode or first frame: compute everything fresh
             K = self.k(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
