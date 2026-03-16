@@ -51,9 +51,9 @@ class KVCache:
             tokens: [B, N, C]
             attn:   [B, num_heads, N, N] attention map (optional)
         """
-        self.K = K.detach().clone().to(K.device)
-        self.V = V.detach().clone().to(V.device)
-        self.tokens = tokens.detach().clone().to(tokens.device)
+        self.K = K.detach().clone()
+        self.V = V.detach().clone()
+        self.tokens = tokens.detach().clone()
         if attn is not None:
             self.prev_attn = attn.detach().clone()
 
