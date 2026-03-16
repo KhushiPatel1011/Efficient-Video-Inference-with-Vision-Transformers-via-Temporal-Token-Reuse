@@ -75,7 +75,7 @@ def main():
                         help="Output CSV path")
     args = parser.parse_args()
 
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     frames_dir = Path(args.frames)
 
     # Loading and Patching Model

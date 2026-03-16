@@ -113,7 +113,7 @@ def main():
     parser.add_argument("--out-csv", type=str, default="results/kv_cache_sweep.csv")
     args = parser.parse_args()
 
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     frames_dir = Path(args.frames)
     ratios = [float(r.strip()) for r in args.ratios.split(",")]
 
