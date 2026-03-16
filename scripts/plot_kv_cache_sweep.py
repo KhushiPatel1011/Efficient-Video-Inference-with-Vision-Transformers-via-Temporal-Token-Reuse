@@ -64,7 +64,7 @@ def main():
 
     plt.suptitle(
         "TBKV KV Cache Temporal Token Reuse — CPU Results\n"
-        "vit_base_patch16_224 | 60 frames | Selective K/V Scatter",
+        "vit_base_patch16_224 | Medical Ultrasound | 60 frames | Selective K/V Scatter",
         fontsize=11
     )
     plt.tight_layout()
