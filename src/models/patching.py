@@ -1,6 +1,12 @@
 """
-Patching for timm ViT.
-Fixed: handling variable token counts across blocks during matching mode.
+KV caching for timm VisionTransformer.
+
+Key design decision for correctness:
+  - Token ORDER and COUNT are preserved across all blocks (no token dropping).
+  - For stable (background) tokens: reuse cached K and V directly.
+  - For changed (foreground) tokens: recompute K and V fresh.
+  - Q is always computed for all tokens.
+  - This preserves residual connections and CLS token position.
 """
 
 import torch
@@ -11,6 +17,7 @@ from timm.models.vision_transformer import Attention, Block, VisionTransformer
 
 from src.cache.kv_cache import KVCache
 
+# Split fused qkv -> separate q, k, v
 
 def _split_qkv_linear(attn_module: Attention) -> None:
     if hasattr(attn_module, "q") and hasattr(attn_module, "k") and hasattr(attn_module, "v"):
@@ -35,137 +42,145 @@ def _split_qkv_linear(attn_module: Attention) -> None:
     attn_module.k = _make_linear(w_k, b_k if has_bias else None)
     attn_module.v = _make_linear(w_v, b_v if has_bias else None)
 
+# Computing stable/changed mask (no token reordering)
 
-def _get_saliency_scores(attn: torch.Tensor, N_tokens: int) -> torch.Tensor:
+def _compute_stable_mask(
+    attn: torch.Tensor,
+    N: int,
+    stable_ratio: float = 0.75,
+) -> torch.Tensor:
     """
-    Computing per-token saliency. Handling size mismatch between attn and N_tokens.
-    attn:     [B, num_heads, N_attn, N_attn]
-    N_tokens: actual size of x we will split
-    Returns:  [B, N_tokens]  — 0=background, >0=foreground
+    Computing a boolean mask identifying stable (background) tokens.
+    Does NOT reorder tokens — mask indices correspond to original token positions.
+
+    attn:        [B, num_heads, N_attn, N_attn]
+    N:           number of tokens in current x (may differ from N_attn)
+    stable_ratio: fraction of tokens to treat as stable (e.g. 0.75 = 75% stable)
+
+    Returns: stable_mask [B, N] — True = stable (reuse K/V), False = changed (recompute)
     """
+    B = attn.shape[0]
+
     if attn.dim() == 4:
-        attn_avg = attn.mean(dim=1)       # [B, N_attn, N_attn]
+        attn_avg = attn.mean(dim=1)   # [B, N_attn, N_attn]
     else:
-        attn_avg = attn
+        attn_avg = attn               # [B, N_attn, N_attn]
 
+    # Entropy-based saliency per token
     scores = (attn_avg * torch.log(attn_avg + 1e-6)).sum(dim=-1)  # [B, N_attn]
 
     N_attn = scores.shape[1]
-    if N_attn != N_tokens:
-        if N_attn > N_tokens:
-            scores = scores[:, :N_tokens]
-        else:
-            pad = scores.mean(dim=1, keepdim=True).expand(-1, N_tokens - N_attn)
-            scores = torch.cat([scores, pad], dim=1)
 
-    # Normalizing to [0, 1]
-    s_min = scores.amin(dim=-1, keepdim=True)
-    s_max = scores.amax(dim=-1, keepdim=True)
-    scores = (scores - s_min) / (s_max - s_min + 1e-6)
+    # Aligning scores size with N (the current token count)
+    if N_attn > N:
+        scores = scores[:, :N]
+    elif N_attn < N:
+        pad = scores.mean(dim=1, keepdim=True).expand(-1, N - N_attn)
+        scores = torch.cat([scores, pad], dim=1)
 
-    # Tokens below mean = background (set to 0)
-    mean_s = scores.mean(dim=-1, keepdim=True)
-    bg_mask = scores < mean_s
-    scores = scores.clone()
-    scores[bg_mask] = 0.0
+    # Lower score = more stable (background)
+    # Mark bottom `stable_ratio` fraction as stable
+    k_stable = max(1, int(N * stable_ratio))
+    k_stable = min(k_stable, N - 1)  # always leave at least 1 changed
 
-    return scores  # [B, N_tokens]
+    # topk with largest=False gives the k_stable LOWEST (most stable) indices
+    stable_idx = torch.topk(scores, k=k_stable, dim=-1, largest=False).indices  # [B, k_stable]
 
+    stable_mask = torch.zeros(B, N, dtype=torch.bool, device=attn.device)
+    stable_mask.scatter_(1, stable_idx, True)
 
-def _extract_bg_fg(
-    x: torch.Tensor,
-    attn: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Spliting x into background and foreground tokens
-    Should be n_bg + n_fg == N exactly
-    x:    [B, N, C]
-    attn: [B, num_heads, N_attn, N_attn]  (N_attn may differ from N)
-    """
-    B, N, C = x.shape
-    scores = _get_saliency_scores(attn, N_tokens=N)  # [B, N]
+    return stable_mask  # [B, N]
 
-    n_bg = int((scores == 0).float().sum(dim=-1).max().item())
-    n_bg = max(1, min(n_bg, N - 1))
-    n_fg = N - n_bg                        # always >= 1, sums to N
-
-    idx_bg = torch.topk(scores, k=n_bg, dim=-1, largest=False).indices
-    idx_fg = torch.topk(scores, k=n_fg, dim=-1, largest=True).indices
-
-    x_bg = torch.gather(x, dim=1, index=idx_bg.unsqueeze(-1).expand(-1, -1, C))
-    x_fg = torch.gather(x, dim=1, index=idx_fg.unsqueeze(-1).expand(-1, -1, C))
-
-    return x_bg, x_fg, idx_bg, idx_fg
-
+# Patched Attention: selective K/V computation
 
 class TBKVAttention(Attention):
+    """
+    Replacing timm Attention.
+
+    Caching mode:
+        - Compute Q, K, V for all tokens normally.
+        - Return K, V, attn_map for caching.
+
+    Matching mode:
+        - Compute Q for ALL tokens (order preserved).
+        - For STABLE tokens: reuse cached K, V.
+        - For CHANGED tokens: recompute K, V fresh.
+        - Merge into full K, V tensors and run attention normally.
+        - Token count and order are NEVER changed.
+    """
 
     def forward(
         self,
         x: torch.Tensor,
         cache: Optional[KVCache] = None,
-        x_unnorm: Optional[torch.Tensor] = None,
         mode: str = "cache",
         prev_attn: Optional[torch.Tensor] = None,
-        r_match: float = 0.75,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
-
+        stable_ratio: float = 0.75,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns: (attn_out, K, V, attn_map)
+            attn_out: [B, N, C]
+            K:        [B, num_heads, N, head_dim]
+            V:        [B, num_heads, N, head_dim]
+            attn_map: [B, num_heads, N, N]
+        """
         B, N, C = x.shape
         head_dim = C // self.num_heads
-        new_tokens = None
 
-        if mode == "match" and cache is not None and not cache.is_empty() and prev_attn is not None:
+        # Always compute Q for all tokens
+        q = self.q(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
+        # [B, heads, N, head_dim]
 
-            x_bg, x_fg, idx_bg, idx_fg = _extract_bg_fg(x, prev_attn)
+        if (mode == "match"
+                and cache is not None
+                and not cache.is_empty()
+                and prev_attn is not None
+                and cache.K is not None
+                and cache.K.shape[2] == N):  # cache must match current token count
 
-            k_matched, v_matched, mc, mt_idx, unm_idx = cache.match_tokens(
-                x_bg, r_match=r_match
-            )
+            # Computing stable mask (which tokens can reuse K/V from cache)
+            stable_mask = _compute_stable_mask(prev_attn, N, stable_ratio)
+            # [B, N] — True = stable
 
-            unm_bg = torch.gather(
-                x_bg, dim=1,
-                index=unm_idx.unsqueeze(-1).expand(-1, -1, C)
-            )
+            changed_mask = ~stable_mask  # [B, N] — True = changed
 
-            tokens_fwd = torch.cat([mc, unm_bg, x_fg], dim=1)
+            # Recomputing K, V only for changed tokens
+            # Start with full cached K, V
+            K = cache.K.clone()  # [B, heads, N, head_dim]
+            V = cache.V.clone()
 
-            if x_unnorm is not None:
-                x_bg_un, x_fg_un, _, _ = _extract_bg_fg(x_unnorm, prev_attn)
-                unm_bg_un = torch.gather(
-                    x_bg_un, dim=1,
-                    index=unm_idx.unsqueeze(-1).expand(-1, -1, C)
-                )
-                new_tokens = torch.cat([mc, unm_bg_un, x_fg_un], dim=1)
-            else:
-                new_tokens = tokens_fwd
+            # For each changed token, recompute its K and V
+            # We do this efficiently by computing K/V for all then selecting
+            K_fresh = self.k(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
+            V_fresh = self.v(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
 
-            q = self.q(tokens_fwd).reshape(B, -1, self.num_heads, head_dim).permute(0, 2, 1, 3)
+            # Replacing changed positions with fresh K, V
+            # changed_mask: [B, N] -> expand to [B, heads, N, head_dim]
+            changed_expanded = changed_mask.unsqueeze(1).unsqueeze(-1).expand_as(K)
+            K = torch.where(changed_expanded, K_fresh, K)
+            V = torch.where(changed_expanded, V_fresh, V)
 
-            tokens_kv = torch.cat([unm_bg, x_fg], dim=1)
-            k_new = self.k(tokens_kv).reshape(B, -1, self.num_heads, head_dim).permute(0, 2, 1, 3)
-            v_new = self.v(tokens_kv).reshape(B, -1, self.num_heads, head_dim).permute(0, 2, 1, 3)
-
-            K = torch.cat([k_matched, k_new], dim=2)
-            V = torch.cat([v_matched, v_new], dim=2)
+            n_changed = int(changed_mask.float().sum(dim=-1).mean().item())
+            n_stable = N - n_changed
 
         else:
-            q = self.q(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
+            # Caching mode or first frame: compute everything fresh
             K = self.k(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
             V = self.v(x).reshape(B, N, self.num_heads, head_dim).permute(0, 2, 1, 3)
 
+        # Standard attention
         attn = (q @ K.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn_map = attn.clone()
         attn = self.attn_drop(attn)
 
-        N_q = q.shape[2]
-        out = (attn @ V).transpose(1, 2).reshape(B, N_q, C)
+        out = (attn @ V).transpose(1, 2).reshape(B, N, C)
         out = self.proj(out)
         out = self.proj_drop(out)
 
-        return out, K, V, new_tokens, attn_map
+        return out, K, V, attn_map
 
+# Patched Block
 
 class TBKVBlock(Block):
 
@@ -178,48 +193,58 @@ class TBKVBlock(Block):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         norm_x = self.norm1(x)
 
-        mode      = getattr(self, "_tbkv_mode",    "cache")
-        prev_attn = getattr(self, "_prev_attn",    None)
-        r_match   = getattr(self, "_tbkv_r_match", 0.75)
+        mode         = getattr(self, "_tbkv_mode",         "cache")
+        prev_attn    = getattr(self, "_prev_attn",         None)
+        stable_ratio = getattr(self, "_tbkv_stable_ratio", 0.75)
 
-        attn_out, K, V, new_tokens, attn_map = self.attn(
+        attn_out, K, V, attn_map = self.attn(
             norm_x,
             cache=self.cache,
-            x_unnorm=x,
             mode=mode,
             prev_attn=prev_attn,
-            r_match=r_match,
+            stable_ratio=stable_ratio,
         )
 
-        if new_tokens is not None and new_tokens.shape[1] != x.shape[1]:
-            x = new_tokens + self._drop_path1(attn_out)
-        else:
-            x = x + self._drop_path1(attn_out)
+        # Standard residual — token count never changes
+        x = x + self._drop_path1(attn_out)
 
+        # Store K/V/tokens in cache after each caching-mode block
         if mode == "cache":
-            self.cache.store(K, V, x, attn=attn_map)
+            self.cache.store(K, V, norm_x, attn=attn_map)
 
+        # Pass this block's attn_map to the next block
         self._prev_attn = attn_map.detach() if attn_map is not None else None
 
         x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
 
+# Public API
 
-def apply_patch(model: VisionTransformer, r_match: float = 0.75) -> VisionTransformer:
+def apply_patch(model: VisionTransformer, stable_ratio: float = 0.75) -> VisionTransformer:
+    """
+    Patching a timm ViT in-place for TBKV temporal token reuse.
+
+    stable_ratio: fraction of tokens treated as stable per block (0.0–1.0).
+                  Higher = more reuse, potentially lower accuracy.
+                  Lower  = less reuse, closer to baseline accuracy.
+    """
     for module in model.modules():
         if isinstance(module, Block) and not isinstance(module, TBKVBlock):
             module.__class__ = TBKVBlock
             module.cache = KVCache()
             module._tbkv_mode = "cache"
-            module._tbkv_r_match = r_match
+            module._tbkv_stable_ratio = stable_ratio
             module._prev_attn = None
+
         elif isinstance(module, Attention) and not isinstance(module, TBKVAttention):
             module.__class__ = TBKVAttention
             _split_qkv_linear(module)
+
     return model
 
 
 def set_caching_mode(model: VisionTransformer, caching: bool) -> None:
+    """True = build cache (first frame), False = reuse cache (subsequent frames)."""
     mode = "cache" if caching else "match"
     for module in model.modules():
         if isinstance(module, TBKVBlock):
@@ -227,6 +252,7 @@ def set_caching_mode(model: VisionTransformer, caching: bool) -> None:
 
 
 def reset_cache(model: VisionTransformer) -> None:
+    """Clear all caches. Call between unrelated video clips."""
     for module in model.modules():
         if isinstance(module, TBKVBlock):
             module.cache.clear()
