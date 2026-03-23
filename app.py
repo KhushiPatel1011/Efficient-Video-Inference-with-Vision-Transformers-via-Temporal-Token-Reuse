@@ -8,12 +8,19 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 def placeholder(video, max_frames, stable_ratio):
+    print(f"DEBUG: function called")
+    print(f"DEBUG: video = {video}")
+    print(f"DEBUG: max_frames = {max_frames}")
+    print(f"DEBUG: stable_ratio = {stable_ratio}")
     try:
         if video is None:
             return "Please upload a video."
         return f"Video received: {video}\nMax frames: {int(max_frames)}\nStable ratio: {float(stable_ratio)}\n\nProcessing pipeline will be connected in the next step."
     except Exception as e:
-        return f"Error: {str(e)}"
+        import traceback
+        tb = traceback.format_exc()
+        print(f"DEBUG ERROR: {tb}")
+        return f"Error: {str(e)}\n\n{tb}"
 
 with gr.Blocks(title="Efficient Video Inference with Vision Transformers via Temporal Token Reuse") as demo:
 
@@ -61,4 +68,4 @@ with gr.Blocks(title="Efficient Video Inference with Vision Transformers via Tem
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(show_error=True)
