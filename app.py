@@ -7,14 +7,16 @@ REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-def placeholder(video):
-    return "Loading UI..."
+def placeholder(video, max_frames, stable_ratio):
+    if video is None:
+        return "Please upload a video."
+    return f"Video received: {video}\nMax frames: {max_frames}\nStable ratio: {stable_ratio}"
 
 with gr.Blocks(title="Efficient Video Inference with Vision Transformers via Temporal Token Reuse") as demo:
 
     gr.Markdown(
         """
-        # Efficient Video Inference via Temporal Token Reuse
+        # Efficient Video Inference with ViT via Temporal Token Reuse
         **Khevna Vadaliya & Darshil Prajapati | AI Capstone, Spring 2026 | Saint Louis University**
         
         This demo compares standard ViT inference against our 
@@ -51,7 +53,7 @@ with gr.Blocks(title="Efficient Video Inference with Vision Transformers via Tem
 
     run_button.click(
         fn=placeholder,
-        inputs=[video_input],
+        inputs=[video_input, max_frames, stable_ratio],
         outputs=[output_text]
     )
 
