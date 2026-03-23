@@ -8,9 +8,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 def placeholder(video, max_frames, stable_ratio):
-    if video is None:
-        return "Please upload a video."
-    return f"Video received: {video}\nMax frames: {max_frames}\nStable ratio: {stable_ratio}"
+    try:
+        if video is None:
+            return "Please upload a video."
+        return f"Video received: {video}\nMax frames: {int(max_frames)}\nStable ratio: {float(stable_ratio)}\n\nProcessing pipeline will be connected in the next step."
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 with gr.Blocks(title="Efficient Video Inference with Vision Transformers via Temporal Token Reuse") as demo:
 
