@@ -1,8 +1,9 @@
 """
 KV Cache Temporal Token Reuse
-Here, it will be done in 2 phases, caching and matching:
-Phase 1 (frame 0):  Caching — full attention, stores K/V/tokens per block.
-Phase 2 (frame 1+): Matching — reuses cached K/V for stable bg tokens,
+
+Two phases:
+Phase 1 (frame 0):  CACHING  — full attention, stores K/V/tokens per block.
+Phase 2 (frame 1+): MATCHING — reuses cached K/V for stable bg tokens,
                     recomputes K/V only for changed/fg tokens.
 
 Usage:
@@ -11,25 +12,26 @@ Usage:
 
 import argparse
 import csv
-import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
-# Making a repo root importable when running as script
+# Make repo root importable when running as a script
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.models.timm_vit import load_timm_vit
 from src.models.patching import apply_patch, set_caching_mode, reset_cache
-from src.data.frame_pairs import iter_frame_pairs
+from src.data.frames_dataset import load_frames_from_folder
 
 
+# ----------------------------
 # Helper functions
+# ----------------------------
 def ms(t0: float, t1: float) -> float:
     return (t1 - t0) * 1000.0
 
@@ -38,15 +40,6 @@ def top1(logits: torch.Tensor) -> Tuple[int, float]:
     probs = torch.softmax(logits, dim=-1)
     conf, idx = probs.max(dim=-1)
     return int(idx.item()), float(conf.item())
-
-
-def run_baseline(model, x: torch.Tensor) -> Tuple[torch.Tensor, float]:
-    #Running full unpatched-style forward (patched model in cache mode = same as baseline).
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        logits = model(x)
-    t1 = time.perf_counter()
-    return logits, ms(t0, t1)
 
 
 def save_csv(rows: List[Dict], out_path: Path) -> None:
@@ -59,26 +52,48 @@ def save_csv(rows: List[Dict], out_path: Path) -> None:
         writer.writeheader()
         writer.writerows(rows)
 
-# Main Function
+
+# ----------------------------
+# Main
+# ----------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--frames", type=str, required=True,
-                        help="Folder of sequential frame images")
-    parser.add_argument("--max-frames", type=int, default=60,
-                        help="Max frames to process")
-    parser.add_argument("--model", type=str, default="vit_base_patch16_224",
-                        help="timm model name")
-    parser.add_argument("--r-match", type=float, default=0.75,
-                        help="Fraction of bg tokens matched to cache (0.0–1.0)")
-    parser.add_argument("--out-csv", type=str,
-                        default="results/kv_cache_reuse.csv",
-                        help="Output CSV path")
+    parser.add_argument(
+        "--frames",
+        type=str,
+        required=True,
+        help="Folder of sequential frame images"
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=60,
+        help="Max frames to process"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="vit_base_patch16_224",
+        help="timm model name"
+    )
+    parser.add_argument(
+        "--r-match",
+        type=float,
+        default=0.75,
+        help="Fraction of bg tokens matched to cache (0.0–1.0)"
+    )
+    parser.add_argument(
+        "--out-csv",
+        type=str,
+        default="results/kv_cache_reuse.csv",
+        help="Output CSV path"
+    )
     args = parser.parse_args()
 
-    device = torch.device("cuda")
+    # Safer device selection
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     frames_dir = Path(args.frames)
 
-    # Loading and Patching Model
     print(f"\nLoading model: {args.model}")
     model, transform, _ = load_timm_vit(model_name=args.model, pretrained=True)
     model.to(device)
@@ -89,107 +104,119 @@ def main():
     reset_cache(model)
 
     print("\n    KV-CACHE TEMPORAL TOKEN REUSE")
-    print(f"Frame 0:      CACHING  mode (full attention, builds K/V cache)")
-    print(f"Frames 1+:    MATCHING mode (reuses cached K/V for stable tokens)")
-    print(f"r_match:      {args.r_match}  ({int(args.r_match*100)}% bg tokens matched to cache)")
+    print("Frame 0:      CACHING  mode (full attention, builds K/V cache)")
+    print("Frames 1+:    MATCHING mode (reuses cached K/V for stable tokens)")
+    print(f"r_match:      {args.r_match}  ({int(args.r_match * 100)}% bg tokens matched to cache)")
+    print(f"device:       {device}")
     print()
-    print("t | mode     | latency_ms | base_ms | top1 | base_top1 | match")
-    print("-" * 65)
+    print("t | mode     | latency_ms | base_ms | speedup | top1 | base_top1 | match")
+    print("-" * 82)
 
     rows: List[Dict] = []
     baseline_times: List[float] = []
     reuse_times: List[float] = []
     match_count = 0
-    frame_idx = 0
 
-    # We are iterating pairs (prev, curr) — but we also need frame 0 that is the cache frame
-    # Idea:
-    #   frame_idx=0 → loading first image alone and running in CACHING mode
-    #   frame_idx=1+ → running in MATCHING mode and comparing it against independent baseline
-
-    # Collecting all frames first (up to max_frames)
-    from src.data.frames_dataset import load_frames_from_folder
     all_frames = load_frames_from_folder(frames_dir, max_frames=args.max_frames)
 
     if len(all_frames) < 2:
         print("ERROR: Need at least 2 frames.")
         return
 
+    video_id = frames_dir.name
+
     for frame_idx, img in enumerate(all_frames):
         x = transform(img).unsqueeze(0).to(device)
 
         if frame_idx == 0:
-            # Caching mode, frame 0
+            # ----------------------------
+            # Frame 0: CACHING mode
+            # ----------------------------
             set_caching_mode(model, caching=True)
 
             t0 = time.perf_counter()
             with torch.no_grad():
                 logits = model(x)
             t1 = time.perf_counter()
-            latency = ms(t0, t1)
 
+            latency = ms(t0, t1)
             pred, conf = top1(logits)
 
-            print(f"{frame_idx:2d} | CACHING  | {latency:10.2f} | {'N/A':>7} | {pred:4d} | {'N/A':>9} | {'N/A':>5}")
+            print(
+                f"{frame_idx:2d} | CACHING  | {latency:10.2f} | {'N/A':>7} | {'N/A':>7} | "
+                f"{pred:4d} | {'N/A':>9} | {'N/A':>5}"
+            )
 
             rows.append({
+                "video_id": video_id,
                 "frame": frame_idx,
                 "mode": "cache",
                 "latency_ms": round(latency, 3),
                 "baseline_ms": None,
+                "speedup": None,
                 "top1": pred,
                 "baseline_top1": None,
                 "match": None,
                 "r_match": args.r_match,
             })
 
+            # Frame 0 is a full forward, so it also counts as baseline-like timing
             baseline_times.append(latency)
 
         else:
-            # Matching Phase, Frame 1+
-            set_caching_mode(model, caching=False)
+            # ----------------------------
+            # Frame 1+: MATCHING mode
+            # ----------------------------
 
-            # Independent baseline (caching mode = full attention, same as unpatched)
+            # Baseline comparison: patched model in caching=True behaves like full attention
             set_caching_mode(model, caching=True)
             t0b = time.perf_counter()
             with torch.no_grad():
                 base_logits = model(x)
             t1b = time.perf_counter()
+
             base_ms_val = ms(t0b, t1b)
             base_pred, _ = top1(base_logits)
             baseline_times.append(base_ms_val)
 
-            # Now running matching mode, that is reuse 
+            # Reuse / matching mode
             set_caching_mode(model, caching=False)
             t0 = time.perf_counter()
             with torch.no_grad():
                 reuse_logits = model(x)
             t1 = time.perf_counter()
+
             reuse_ms_val = ms(t0, t1)
-            reuse_pred, reuse_conf = top1(reuse_logits)
+            reuse_pred, _ = top1(reuse_logits)
             reuse_times.append(reuse_ms_val)
 
             matched = int(base_pred == reuse_pred)
             match_count += matched
 
+            speedup_val = base_ms_val / reuse_ms_val if reuse_ms_val > 0 else None
+
             print(
-                f"{frame_idx:2d} | MATCHING | {reuse_ms_val:10.2f} | "
-                f"{base_ms_val:7.2f} | {reuse_pred:4d} | {base_pred:9d} | "
+                f"{frame_idx:2d} | MATCHING | {reuse_ms_val:10.2f} | {base_ms_val:7.2f} | "
+                f"{speedup_val:7.3f} | {reuse_pred:4d} | {base_pred:9d} | "
                 f"{'YES' if matched else 'NO':>5}"
             )
 
             rows.append({
+                "video_id": video_id,
                 "frame": frame_idx,
-                "mode": "match",
+                "mode": "reuse",
                 "latency_ms": round(reuse_ms_val, 3),
                 "baseline_ms": round(base_ms_val, 3),
+                "speedup": round(speedup_val, 3) if speedup_val is not None else None,
                 "top1": reuse_pred,
                 "baseline_top1": base_pred,
                 "match": matched,
                 "r_match": args.r_match,
             })
 
+    # ----------------------------
     # Summary
+    # ----------------------------
     n_reuse = len(reuse_times)
     n_total = len(rows)
 
@@ -200,14 +227,17 @@ def main():
         match_rate = match_count / n_reuse if n_reuse > 0 else 0.0
 
         print("\n    SUMMARY")
+        print(f"video_id:           {video_id}")
         print(f"total_frames:       {n_total}")
         print(f"matching_frames:    {n_reuse}")
-        print(f"avg_baseline_ms:    {avg_baseline:.2f}  | fps: {1000/avg_baseline:.2f}")
-        print(f"avg_reuse_ms:       {avg_reuse:.2f}  | fps: {1000/avg_reuse:.2f}")
+        print(f"avg_baseline_ms:    {avg_baseline:.2f}  | fps: {1000 / avg_baseline:.2f}")
+        print(f"avg_reuse_ms:       {avg_reuse:.2f}  | fps: {1000 / avg_reuse:.2f}")
         print(f"measured_speedup:   {speedup:.3f}x")
         print(f"top1_match_rate:    {match_rate:.3f}  ({match_count}/{n_reuse} frames)")
 
-    # Saving CSV
+    # ----------------------------
+    # Save CSV
+    # ----------------------------
     out_csv = Path(args.out_csv)
     save_csv(rows, out_csv)
     print(f"\nsaved_csv: {out_csv}")
