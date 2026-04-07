@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def plot_metric(df, metric, ylabel, filename):
-    plt.figure()
+    plt.figure(figsize=(8, 5))
 
     motion_buckets = sorted(df["motion_bucket"].unique())
     x = range(len(motion_buckets))
@@ -16,24 +16,31 @@ def plot_metric(df, metric, ylabel, filename):
         bucket_df = df[df["motion_bucket"] == bucket]
 
         fixed = bucket_df[bucket_df["policy"] == "fixed"][metric].mean()
-        adaptive = bucket_df[bucket_df["policy"] == "adaptive"][metric].mean()
+
+        adaptive = bucket_df[
+            bucket_df["policy"].isin(["adaptive", "adaptive_bucket"])
+        ][metric].mean()
 
         fixed_vals.append(fixed)
         adaptive_vals.append(adaptive)
 
     width = 0.35
 
-    plt.bar([i - width/2 for i in x], fixed_vals, width, label="Fixed")
-    plt.bar([i + width/2 for i in x], adaptive_vals, width, label="Adaptive")
+    plt.bar([i - width / 2 for i in x], fixed_vals, width, label="Fixed")
+    plt.bar([i + width / 2 for i in x], adaptive_vals, width, label="Adaptive")
 
-    plt.xticks(x, motion_buckets)
+    plt.xticks(list(x), motion_buckets)
     plt.ylabel(ylabel)
+    plt.xlabel("Motion Bucket")
     plt.title(f"{ylabel} (Fixed vs Adaptive)")
     plt.legend()
+    plt.grid(axis="y", alpha=0.3)
 
     out_path = Path("results") / filename
-    plt.savefig(out_path)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
     print(f"Saved: {out_path}")
+    plt.close()
 
 
 def main():
@@ -43,6 +50,11 @@ def main():
         raise FileNotFoundError(f"Missing CSV: {csv_path}")
 
     df = pd.read_csv(csv_path)
+
+    # Normalize policy names just in case
+    df["policy"] = df["policy"].replace({
+        "adaptive_bucket": "adaptive"
+    })
 
     plot_metric(df, "avg_speedup", "Average Speedup", "fixed_vs_adaptive_speedup.png")
     plot_metric(df, "avg_reuse_ms", "Latency (ms)", "fixed_vs_adaptive_latency.png")
