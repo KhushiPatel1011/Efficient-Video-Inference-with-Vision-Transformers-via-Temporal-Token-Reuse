@@ -60,3 +60,19 @@ Thumbs.db
 
 # Ignore experiment outputs
 results/
+
+# Video files
+data/raw/videos/
+data/raw/medical_frames/
+data/raw/sample_video_frames/
+
+# Extracted experiment frames
+data/experiments/crowd/
+data/experiments/pest_detection/
+data/experiments/street_surveillance/
+data/experiments/dashcam/
+data/experiments/sports/
+
+data/experiments/high_motion/
+data/experiments/low_motion/
+data/experiments/medium_motion/
