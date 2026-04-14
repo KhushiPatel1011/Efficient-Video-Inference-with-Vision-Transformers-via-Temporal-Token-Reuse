@@ -1,7 +1,7 @@
 video_id,path,motion_bucket
-clip_a,data/experiments/low_motion/clip_a,low
-clip_b,data/experiments/low_motion/clip_b,low
-clip_c,data/experiments/medium_motion/clip_c,medium
-clip_d,data/experiments/medium_motion/clip_d,medium
-clip_e,data/experiments/high_motion/clip_e,high
-clip_f,data/experiments/high_motion/clip_f,high
+medical_ultrasound,data/raw/medical_frames,low
+pest_detection,data/experiments/pest_detection/frames,low
+street_surveillance,data/experiments/street_surveillance/frames,low
+crowd,data/experiments/crowd/frames,medium
+dashcam,data/experiments/dashcam/frames,medium
+sports,data/experiments/sports/frames,high
