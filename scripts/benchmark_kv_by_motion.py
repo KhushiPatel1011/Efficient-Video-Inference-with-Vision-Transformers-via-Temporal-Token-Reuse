@@ -34,18 +34,22 @@ def summarize_run(csv_path: Path, r_match: float, motion_bucket: str, video_id: 
         raise ValueError(f"No reuse rows found in {csv_path}")
 
     avg_baseline_ms = reuse_df["baseline_ms"].dropna().mean()
-    avg_reuse_ms = reuse_df["latency_ms"].dropna().mean()
-    avg_speedup = reuse_df["speedup"].dropna().mean()
+    reuse_col = "reuse_ms" if "reuse_ms" in reuse_df.columns else "latency_ms"
+    avg_reuse_ms = reuse_df[reuse_col].dropna().mean()
+    avg_speedup = avg_baseline_ms / avg_reuse_ms if avg_reuse_ms > 0 else 0.0
     match_rate = reuse_df["match"].dropna().mean()
 
     return {
         "video_id": video_id,
         "motion_bucket": motion_bucket,
         "r_match": r_match,
+        "stable_ratio": r_match,
         "frames_used": int(len(df)),
         "reuse_frames": int(len(reuse_df)),
         "avg_baseline_ms": round(float(avg_baseline_ms), 3),
         "avg_reuse_ms": round(float(avg_reuse_ms), 3),
+        "baseline_fps": round(1000.0 / float(avg_baseline_ms), 3),
+        "reuse_fps": round(1000.0 / float(avg_reuse_ms), 3),
         "avg_speedup": round(float(avg_speedup), 3),
         "top1_match_rate": round(float(match_rate), 3),
     }
@@ -64,8 +68,8 @@ def main():
     parser.add_argument(
         "--r-values",
         type=str,
-        default="0.25,0.50,0.75",
-        help="Comma-separated r_match values",
+        default="0.00,0.25,0.50,0.70,0.75,0.80,0.85,0.90,0.95,0.99,1.00",
+        help="Comma-separated r_match/stable-ratio values across the full 0–1 range",
     )
     parser.add_argument(
         "--out-csv",
